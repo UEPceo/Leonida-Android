@@ -1,0 +1,81 @@
+name: Build Leonida Mobile APK & PE Probes
+
+on:
+  push:
+    branches: [ main, master, mobile ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    name: Compilar APK Android (arm64-v8a)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configurar Android SDK y NDK 26.1.10909125
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0 ndk;26.1.10909125 cmake;3.22.1'
+
+      - name: Instalar Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Compilar APK Debug
+        working-directory: leonida-mobile/launcher
+        run: gradle assembleDebug --stacktrace
+
+      - name: Subir artefacto LeonidaMobile-debug.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeonidaMobile-debug-apk
+          path: leonida-mobile/launcher/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  build-pe-probes:
+    name: Compilar Sondas PE x64 (synth_frame.exe + vkprobe.exe)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar mingw-w64 y cabeceras Vulkan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 libvulkan-dev wget unzip
+
+      - name: Descargar Vulkan SDK Windows (import lib vulkan-1)
+        run: |
+          mkdir -p /tmp/vk-win
+          cp -r /usr/include/vulkan /tmp/vk-win/
+          cp -r /usr/include/vk_video /tmp/vk-win/ || true
+
+      - name: Compilar synth_frame.exe y vkprobe.exe
+        working-directory: leonida-mobile
+        run: |
+          mkdir -p build/pe
+          python3 -c '
+          import re, pathlib
+          hdr = pathlib.Path("/usr/include/vulkan/vulkan_core.h").read_text() + "\n" + pathlib.Path("/usr/include/vulkan/vulkan_win32.h").read_text()
+          funcs = sorted(set(re.findall(r"VKAPI_ATTR\s+\S+\s+VKAPI_CALL\s+(vk[A-Za-z0-9_]+)\s*\(", hdr)))
+          pathlib.Path("/tmp/vk-win/vulkan-1.def").write_text("LIBRARY vulkan-1.dll\nEXPORTS\n" + "\n".join("  " + f for f in funcs) + "\n")
+          '
+          x86_64-w64-mingw32-dlltool -d /tmp/vk-win/vulkan-1.def -l /tmp/vk-win/libvulkan-1.a
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -I/tmp/vk-win -L/tmp/vk-win -o build/pe/synth_frame.exe probe/synth_frame.c -lvulkan-1 -luser32 -lgdi32
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -I/tmp/vk-win -L/tmp/vk-win -o build/pe/vkprobe.exe probe/vkprobe.c -lvulkan-1
+
+      - name: Subir artefactos PE x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeonidaMobile-pe-probes
+          path: leonida-mobile/build/pe/*.exe
+          if-no-files-found: error
