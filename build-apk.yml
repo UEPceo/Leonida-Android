@@ -1,0 +1,100 @@
+name: Build Leonida Mobile APK & PE Probes
+
+on:
+  push:
+    branches: [ main, master, mobile ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    name: Compilar APK Android (arm64-v8a)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Localizar carpeta launcher
+        id: paths
+        run: |
+          if [ -d "leonida-mobile/launcher" ]; then
+            echo "launcher_dir=leonida-mobile/launcher" >> $GITHUB_OUTPUT
+          elif [ -d "mobile/launcher" ]; then
+            echo "launcher_dir=mobile/launcher" >> $GITHUB_OUTPUT
+          elif [ -d "launcher" ]; then
+            echo "launcher_dir=launcher" >> $GITHUB_OUTPUT
+          else
+            echo "::error::No se encontro la carpeta launcher/ en el repositorio"
+            find . -maxdepth 3
+            exit 1
+          fi
+
+      - name: Configurar JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configurar Android SDK y NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0 ndk;26.1.10909125 cmake;3.22.1'
+
+      - name: Instalar Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Compilar APK Debug
+        working-directory: ${{ steps.paths.outputs.launcher_dir }}
+        run: gradle assembleDebug --stacktrace
+
+      - name: Subir artefacto LeonidaMobile-debug.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeonidaMobile-debug-apk
+          path: ${{ steps.paths.outputs.launcher_dir }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  build-pe-probes:
+    name: Compilar Sondas PE x64 (synth_frame.exe + vkprobe.exe)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Localizar carpeta probe
+        id: paths
+        run: |
+          if [ -d "leonida-mobile/probe" ]; then
+            echo "base_dir=leonida-mobile" >> $GITHUB_OUTPUT
+          elif [ -d "mobile/probe" ]; then
+            echo "base_dir=mobile" >> $GITHUB_OUTPUT
+          elif [ -d "probe" ]; then
+            echo "base_dir=." >> $GITHUB_OUTPUT
+          else
+            echo "::error::No se encontro la carpeta probe/ en el repositorio"
+            exit 1
+          fi
+
+      - name: Instalar mingw-w64 y cabeceras Vulkan
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mingw-w64 libvulkan-dev
+
+      - name: Compilar synth_frame.exe y vkprobe.exe
+        working-directory: ${{ steps.paths.outputs.base_dir }}
+        run: |
+          mkdir -p /tmp/vk-win build/pe
+          cp -r /usr/include/vulkan /tmp/vk-win/
+          grep -hEo 'vk[A-Za-z0-9_]+\s*\(' /usr/include/vulkan/vulkan_core.h /usr/include/vulkan/vulkan_win32.h | sed 's/[[:space:]]*(//' | sort -u | awk 'BEGIN{print "LIBRARY vulkan-1.dll\nEXPORTS"} {print "  " $1}' > /tmp/vk-win/vulkan-1.def
+          x86_64-w64-mingw32-dlltool -d /tmp/vk-win/vulkan-1.def -l /tmp/vk-win/libvulkan-1.a
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -I/tmp/vk-win -L/tmp/vk-win -o build/pe/synth_frame.exe probe/synth_frame.c -lvulkan-1 -luser32 -lgdi32
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -I/tmp/vk-win -L/tmp/vk-win -o build/pe/vkprobe.exe probe/vkprobe.c -lvulkan-1
+
+      - name: Subir artefactos PE x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeonidaMobile-pe-probes
+          path: ${{ steps.paths.outputs.base_dir }}/build/pe/*.exe
+          if-no-files-found: error
